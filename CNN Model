@@ -1,0 +1,155 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt # data visualization
+from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
+from sklearn.preprocessing import scale,StandardScaler,minmax_scale,normalize,MinMaxScaler
+import matplotlib.pyplot as plt
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                             roc_curve, auc, confusion_matrix, matthews_corrcoef,roc_auc_score)
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras import layers, regularizers
+from tensorflow.keras.optimizers import Adam
+from tensorflow import keras
+from keras.layers import Embedding, Conv1D, MaxPooling1D, Dropout, Flatten, Dense, GlobalAveragePooling1D, Input,BatchNormalization, Add, concatenate,GlobalAveragePooling1D, MultiHeadAttention, LayerNormalization
+from tensorflow.keras.models import load_model
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+
+X_train=np.load('X_train_human_43_blosum.npy')
+X_test=np.load('X_test_human_43_blosum.npy')
+y_train=np.load("y_train_human_43_blosum.npy")
+y_test=np.load("y_test_human_43_blosum.npy")
+
+def create_model(input_shape):
+    model = Sequential([
+        Conv1D(256, kernel_size=7, activation='relu', input_shape=input_shape),
+        MaxPooling1D(pool_size=2),
+        Conv1D(384, kernel_size=7, activation='relu'),
+        MaxPooling1D(pool_size=2),
+        Conv1D(320, kernel_size=7, activation='relu'),
+        MaxPooling1D(pool_size=2),
+        Conv1D(288, kernel_size=7, activation='relu'),
+        MaxPooling1D(pool_size=2),
+        Dropout(0.1),
+        Conv1D(512, kernel_size=3, activation='relu'),
+        MaxPooling1D(pool_size=2),
+        Dropout(0.1),
+        Conv1D(128, kernel_size=5, activation='relu'),
+        MaxPooling1D(pool_size=2),
+        Flatten(),
+        Dense(384, activation='relu'),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0001), metrics=['accuracy'])
+    return model
+
+skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+cv_accuracy, cv_recall, cv_precision, cv_f1, cv_mcc, cv_auc = [], [], [], [], [], []
+cv_tprs = []
+cv_aucs = []
+mean_fpr = np.linspace(0, 1, 100)
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train)):
+    # Extract fold-specific training and validation data
+    X_train_fold, X_val_fold = X_train[train_idx], X_train[val_idx]
+    y_train_fold, y_val_fold = y_train[train_idx], y_train[val_idx]
+
+    # Apply MinMaxScaler independently to each fold
+    scaler = MinMaxScaler()
+    X_train_fold = scaler.fit_transform(X_train_fold)
+    X_val_fold = scaler.transform(X_val_fold)
+
+    # Reshape for Conv1D input (assuming single-channel input)
+    X_train_fold = X_train_fold[..., np.newaxis]
+    X_val_fold = X_val_fold[..., np.newaxis]
+
+    model = create_model(input_shape=(X_train_fold.shape[1], 1))
+
+    es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10, restore_best_weights=True)
+    mc = ModelCheckpoint(f'best_model_CNN_fold_{fold}.keras', monitor='val_accuracy', mode='max', verbose=1, save_best_only=True)
+
+    history = model.fit(
+        X_train_fold, y_train_fold,
+        validation_data=(X_val_fold, y_val_fold),
+        batch_size=64, epochs=60, verbose=1,
+        callbacks=[es, mc]
+    )
+
+    y_pred = model.predict(X_val_fold)
+    y_pred_class = (y_pred > 0.5).astype(int)
+
+    cv_accuracy.append(accuracy_score(y_val_fold, y_pred_class))
+    cv_recall.append(recall_score(y_val_fold, y_pred_class))
+    cv_precision.append(precision_score(y_val_fold, y_pred_class))
+    cv_f1.append(f1_score(y_val_fold, y_pred_class))
+    cv_mcc.append(matthews_corrcoef(y_val_fold, y_pred_class))
+    cv_auc.append(roc_auc_score(y_val_fold, y_pred))
+
+    fpr, tpr, _ = roc_curve(y_val_fold, y_pred)
+    cv_tprs.append(np.interp(mean_fpr, fpr, tpr))
+    cv_tprs[-1][0] = 0.0
+    roc_auc = auc(fpr, tpr)
+    cv_aucs.append(roc_auc)
+
+print(f"Cross-Validation Accuracy: {np.mean(cv_accuracy):.4f}")
+print(f"Cross-Validation Recall: {np.mean(cv_recall):.4f}")
+print(f"Cross-Validation Precision: {np.mean(cv_precision):.4f}")
+print(f"Cross-Validation F1: {np.mean(cv_f1):.4f}")
+print(f"Cross-Validation MCC: {np.mean(cv_mcc):.4f}")
+print(f"Cross-Validation AUC: {np.mean(cv_auc):.4f}")
+
+scaler = MinMaxScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)  # Transform test set with the same scaler
+X_train_scaled = X_train_scaled[..., np.newaxis]
+X_test_scaled = X_test_scaled[..., np.newaxis]
+
+final_model = create_model(input_shape=(X_train_scaled.shape[1], 1))
+es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=10, restore_best_weights=True)
+mc = ModelCheckpoint('Blosum_CNN_human_43.keras', monitor='val_accuracy', mode='max', verbose=1, save_best_only=True)
+
+history = final_model.fit(
+    X_train_scaled, y_train,
+    validation_split=0.1,  # Use 10% of training data for validation
+    batch_size=64, epochs=60, verbose=1,
+    callbacks=[es, mc]
+)
+
+y_test_pred = final_model.predict(X_test_scaled)
+y_test_pred_class = (y_test_pred > 0.5).astype(int)
+
+test_accuracy = accuracy_score(y_test, y_test_pred_class)
+test_recall = recall_score(y_test, y_test_pred_class)
+test_precision = precision_score(y_test, y_test_pred_class)
+test_f1 = f1_score(y_test, y_test_pred_class)
+test_mcc = matthews_corrcoef(y_test, y_test_pred_class)
+test_auc = roc_auc_score(y_test, y_test_pred)
+
+print(f"Test Accuracy: {test_accuracy:.4f}")
+print(f"Test Recall: {test_recall:.4f}")
+print(f"Test Precision: {test_precision:.4f}")
+print(f"Test F1: {test_f1:.4f}")
+print(f"Test MCC: {test_mcc:.4f}")
+print(f"Test AUC: {test_auc:.4f}")
+
+plt.figure(figsize=(10, 8))
+
+mean_tpr = np.mean(cv_tprs, axis=0)
+mean_tpr[-1] = 1.0
+mean_auc = auc(mean_fpr, mean_tpr)
+std_auc = np.std(cv_aucs)
+plt.plot(mean_fpr, mean_tpr, color='b', label=f'CV (AUC = {mean_auc:.3f})', lw=2, alpha=.8)
+
+fpr_test, tpr_test, _ = roc_curve(y_test, y_test_pred)
+roc_auc_test = auc(fpr_test, tpr_test)
+plt.plot(fpr_test, tpr_test, color='r', label=f'Test (AUC = {roc_auc_test:.3f})', lw=2, alpha=.8)
+
+plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='k', alpha=.8)
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curves')
+plt.legend(loc="lower right")
+plt.show()
+
